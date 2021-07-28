@@ -13,6 +13,7 @@ import (
 	"github.com/cdle/jd_study/jdc/models"
 
 	"github.com/astaxie/beego/httplib"
+	"github.com/astaxie/beego/logs"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -36,7 +37,9 @@ type StepThree struct {
 }
 
 var JdCookieRunners sync.Map
-var jdua = "jdapp;android;10.0.5;11;0393465333165363-5333430323261366;network/wifi;model/M2102K1C;osVer/30;appBuild/88681;partner/lc001;eufv/1;jdSupportDarkMode/0;Mozilla/5.0 (Linux; Android 11; M2102K1C Build/RKQ1.201112.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/77.0.3865.120 MQQBrowser/6.2 TBS/045534 Mobile Safari/537.36"
+var jdua = func() string {
+	return "jdapp;android;12.0.5;11;0393465333165363-" + fmt.Sprint(time.Now().Unix()) + ";network/wifi;model/M2102K1C;osVer/30;appBuild/88681;partner/lc001;eufv/1;jdSupportDarkMode/0;Mozilla/5.0 (Linux; Android 11; M2102K1C Build/RKQ1.201112.002; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/77.0.3865.120 MQQBrowser/6.2 TBS/045534 Mobile Safari/537.36"
+}
 
 func (c *LoginController) GetQrcode() {
 	if v := c.GetSession("jd_token"); v != nil {
@@ -59,7 +62,7 @@ func (c *LoginController) GetQrcode() {
 	req.Header("Accept", "application/json, text/plain, */*")
 	req.Header("Accept-Language", "zh-cn")
 	req.Header("Referer", url)
-	req.Header("User-Agent", jdua)
+	req.Header("User-Agent", jdua())
 	req.Header("Host", "plogin.m.jd.com")
 	rsp, err := req.Response()
 	if err != nil {
@@ -93,7 +96,7 @@ func (c *LoginController) GetQrcode() {
 	req.Header("Referer", fmt.Sprintf(`https://plogin.m.jd.com/login/login?appid=300&returnurl=https://wqlogin2.jd.com/passport/LoginRedirect?state=%d&returnurl=//home.m.jd.com/myJd/newhome.action?sceneval=2&ufc=&/myJd/home.action&source=wq_passport`,
 		state),
 	)
-	req.Header("User-Agent", jdua)
+	req.Header("User-Agent", jdua())
 	req.Header("Host", "plogin.m.jd.com")
 	req.Body(fmt.Sprintf(`{
 		'lang': 'chs',
@@ -189,7 +192,7 @@ func CheckLogin(token, cookie, okl_token string) string {
 	req.Header("Connection", "Keep-Alive")
 	req.Header("Content-Type", "application/x-www-form-urlencoded; Charset=UTF-8")
 	req.Header("Accept", "application/json, text/plain, */*")
-	req.Header("User-Agent", jdua)
+	req.Header("User-Agent", jdua())
 	req.Header("Host", "plogin.m.jd.com")
 
 	req.Param("lang", "chs")
@@ -214,10 +217,24 @@ func CheckLogin(token, cookie, okl_token string) string {
 		pt_key := FetchJdCookieValue("pt_key", cookies)
 		pt_pin := FetchJdCookieValue("pt_pin", cookies)
 		go func() {
-			models.Save <- &models.JdCookie{
+			ScanedAt := time.Now().Local().Format("2006-01-02")
+			ck := models.JdCookie{
 				PtKey: pt_key,
 				PtPin: pt_pin,
 			}
+			if nck := models.GetJdCookie(ck.PtPin); nck != nil {
+				ck.Updates(map[string]interface{}{
+					"PtKey":     ck.PtKey,
+					"ScanedAt":  ScanedAt,
+					"Available": models.True,
+				})
+				logs.Info("更新账号，%s", ck.PtPin)
+			} else {
+				ck.ScanedAt = ScanedAt
+				models.SaveJdCookie(ck)
+				logs.Info("添加账号，%s", ck.PtPin)
+			}
+			models.Save <- &ck
 		}()
 		JdCookieRunners.Store(token, []string{})
 		return "成功"

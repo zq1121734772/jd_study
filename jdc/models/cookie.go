@@ -2,18 +2,18 @@ package models
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"io/ioutil"
 
 	"github.com/astaxie/beego/httplib"
-	"github.com/astaxie/beego/logs"
+	"github.com/beego/beego/v2/core/logs"
 	"github.com/buger/jsonparser"
 )
 
@@ -27,7 +27,12 @@ func init() {
 			if V4Config != "" {
 				V4Handle(ss)
 			} else {
-				QLHandle(ss)
+				if QlVersion == "2.2" {
+					QL2d2Handle(ss)
+				} else {
+					QLHandle(ss)
+				}
+
 			}
 
 		}
@@ -35,16 +40,18 @@ func init() {
 }
 
 type JdCookie struct {
-	ID        int
-	CreatedAt time.Time `json:"-"`
+	Priority  int
+	ScanedAt  string
 	PtKey     string
-	PtPin     string `gorm:"unique"`
+	PtPin     string
 	Note      string
-	Available string    `gorm:"default:true" validate:"oneof=true false"`
-	ScanedAt  time.Time `gorm:"column:ScanedAt" json:"-"`
+	Available string
 	Nickname  string
 	BeanNum   string
 }
+
+var True = "true"
+var False = "false"
 
 var Save chan *JdCookie
 
@@ -54,6 +61,7 @@ var Token = ""
 var QlAddress = ""
 var QlUserName = ""
 var QlPassword = ""
+var QlVersion = "2.8"
 var V4Config = ""
 
 func GetToken() error {
@@ -71,9 +79,10 @@ func GetToken() error {
 }
 
 const (
-	GET  = "GET"
-	POST = "POST"
-	PUT  = "PUT"
+	GET    = "GET"
+	POST   = "POST"
+	PUT    = "PUT"
+	DELETE = "DELETE"
 )
 
 func V4Handle(ck *JdCookie) error {
@@ -84,32 +93,37 @@ func V4Handle(ck *JdCookie) error {
 	}
 	defer f.Close()
 	rd := bufio.NewReader(f)
-	max := 1
-	new := true
 	for {
 		line, err := rd.ReadString('\n') //以'\n'为结束符读入一行
 		if err != nil || io.EOF == err {
 			break
 		}
 		if pt := regexp.MustCompile(`^#?\s?Cookie(\d+)=\S+pt_key=(.*);pt_pin=([^'";\s]+);?`).FindStringSubmatch(line); len(pt) != 0 {
-			if pt[3] == ck.PtPin {
-				pt[2] = ck.PtKey
-				new = false
-				ck := fmt.Sprintf("Cookie%d=\"pt_key=%s;pt_pin=%s;\"\n", max, ck.PtKey, pt[3])
-				logs.Info("更新账号，%s", ck)
-				line = ck
-			} else {
-				line = fmt.Sprintf("Cookie%d=\"pt_key=%s;pt_pin=%s;\"\n", max, pt[2], pt[3])
+			if nck := GetJdCookie(pt[3]); nck == nil {
+				SaveJdCookie(JdCookie{
+					PtKey:     pt[2],
+					PtPin:     pt[3],
+					Available: True,
+				})
 			}
-			max++
+			continue
+		}
+		if pt := regexp.MustCompile(`^TempBlockCookie=`).FindString(line); pt != "" {
+			continue
+		}
+		if pt := regexp.MustCompile(`^Cookie\d+=`).FindString(line); pt != "" {
+			continue
 		}
 		config += line
 	}
-	if new {
-		ck := fmt.Sprintf("Cookie%d=\"pt_key=%s;pt_pin=%s;\"\n", max, ck.PtKey, ck.PtPin)
-		logs.Info("更新账号，%s", ck)
-		config += ck
+	TempBlockCookie := ""
+	for i, ck := range GetJdCookies() {
+		if ck.Available == False {
+			TempBlockCookie += fmt.Sprintf("%d ", i+1)
+		}
+		config = fmt.Sprintf("Cookie%d=\"pt_key=%s;pt_pin=%s;\"\n", i+1, ck.PtKey, ck.PtPin) + config
 	}
+	config = fmt.Sprintf(`TempBlockCookie="%s"`, TempBlockCookie) + "\n" + config
 	f.Truncate(0)
 	f.Seek(0, 0)
 	if _, err := io.WriteString(f, config); err != nil {
@@ -127,25 +141,23 @@ func QLHandle(ck *JdCookie) error {
 	_id, _ := jsonparser.GetString(data, "data", "[0]", "_id")
 	if _id == "" {
 		request("/api/envs", POST, `{"name":"JD_COOKIE","value":"pt_key=`+ck.PtKey+`;pt_pin=`+ck.PtPin+`;"}`)
-		return nil
 	}
-	new := true
 	newValue := ""
 	for _, pt := range regexp.MustCompile(`pt_key=(\S+);pt_pin=([^;\s]+);?`).FindAllStringSubmatch(value, -1) {
 		if len(pt) == 3 {
-			if pt[2] == ck.PtPin {
-				pt[1] = ck.PtKey
-				new = false
+			if nck := GetJdCookie(pt[2]); nck == nil {
+				SaveJdCookie(JdCookie{
+					PtKey:     pt[1],
+					PtPin:     pt[2],
+					Available: True,
+				})
 			}
-			ck := fmt.Sprintf("pt_key=%s;pt_pin=%s;\\n", pt[1], pt[2])
-			logs.Info("更新账号，%s", ck)
-			newValue += ck
 		}
 	}
-	if new {
-		ck := fmt.Sprintf("pt_key=%s;pt_pin=%s;\\n", ck.PtKey, ck.PtPin)
-		logs.Info("添加账号，%s", ck)
-		newValue += ck
+	for _, ck := range GetJdCookies() {
+		if ck.Available == True {
+			newValue += fmt.Sprintf("pt_key=%s;pt_pin=%s;\\n", ck.PtKey, ck.PtPin)
+		}
 	}
 	request("/api/envs", PUT, `{"name":"JD_COOKIE","value":"`+newValue+`","_id":"`+_id+`"}`)
 	return nil
@@ -154,7 +166,7 @@ func QLHandle(ck *JdCookie) error {
 func request(ss ...string) []byte {
 	var api, method, body string
 	for _, s := range ss {
-		if s == GET || s == POST || s == PUT {
+		if s == GET || s == POST || s == PUT || s == DELETE {
 			method = s
 		} else if strings.Contains(s, "api") {
 			api = s
@@ -164,11 +176,14 @@ func request(ss ...string) []byte {
 	}
 	var req *httplib.BeegoHTTPRequest
 	for {
-		if method == POST {
+		switch method {
+		case POST:
 			req = httplib.Post(QlAddress + api)
-		} else if method == PUT {
+		case PUT:
 			req = httplib.Put(QlAddress + api)
-		} else {
+		case DELETE:
+			req = httplib.Delete(QlAddress + api)
+		default:
 			req = httplib.Get(QlAddress + api)
 		}
 		req.Header("Authorization", "Bearer "+Token)
@@ -176,15 +191,60 @@ func request(ss ...string) []byte {
 			req.Header("Content-Type", "application/json;charset=UTF-8")
 			req.Body(body)
 		}
-
 		if data, err := req.Bytes(); err == nil {
 			code, _ := jsonparser.GetInt(data, "code")
 			if code == 200 {
 				return data
 			} else {
+				logs.Warn(string(data))
 				GetToken()
 			}
 		}
 	}
 	return []byte{}
+}
+
+func QL2d2Handle(ck *JdCookie) error {
+	if Token == "" {
+		GetToken()
+	}
+	var data = request("/api/cookies")
+	type AutoGenerated struct {
+		Code int `json:"code"`
+		Data []struct {
+			Value     string  `json:"value"`
+			ID        string  `json:"_id"`
+			Created   int64   `json:"created"`
+			Status    int     `json:"status"`
+			Timestamp string  `json:"timestamp"`
+			Position  float64 `json:"position"`
+			Nickname  string  `json:"nickname"`
+		} `json:"data"`
+	}
+	var a = AutoGenerated{}
+	ids := []string{}
+	json.Unmarshal(data, &a)
+	for _, vv := range a.Data {
+		ids = append(ids, fmt.Sprintf("\"%s\"", vv.ID))
+		res := regexp.MustCompile(`pt_key=(\S+);pt_pin=([^\s;]+);?`).FindStringSubmatch(vv.Value)
+		if len(res) == 3 {
+			SaveJdCookie(JdCookie{
+				PtKey:     res[1],
+				PtPin:     res[2],
+				Available: True,
+			})
+		}
+
+	}
+	if len(ids) > 0 {
+		data = request("/api/cookies", DELETE, fmt.Sprintf(`[%s]`, strings.Join(ids, ",")))
+	}
+	newValue := []string{}
+	for _, ck := range GetJdCookies() {
+		if ck.Available == True {
+			newValue = append(newValue, fmt.Sprintf("\"pt_key=%s;pt_pin=%s;\"", ck.PtKey, ck.PtPin))
+		}
+	}
+	request("/api/cookies", POST, fmt.Sprintf(`[%s]`, strings.Join(newValue, ",")))
+	return nil
 }

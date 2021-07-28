@@ -41,6 +41,8 @@ func main() {
 				models.QlUserName = v
 			case "-qlp":
 				models.QlPassword = v
+			case "-qlv":
+				models.QlVersion = v
 			case "-v4":
 				models.V4Config = v
 			}
@@ -52,6 +54,7 @@ func main() {
 			logs.Warn("无法打开V4配置文件，请检查路径是否正确")
 			return
 		}
+		models.V4Handle(&models.JdCookie{})
 		f.Close()
 	} else {
 		if models.QlAddress == "" {
@@ -79,6 +82,8 @@ func main() {
 	})
 	web.Router("/api/login/qrcode", &controllers.LoginController{}, "get:GetQrcode")
 	web.Router("/api/login/query", &controllers.LoginController{}, "get:Query")
+	web.Router("/api/account", &controllers.AccountController{}, "get:List")
+	web.Router("/api/account", &controllers.AccountController{}, "post:CreateOrUpdate")
 	web.BConfig.AppName = "jdc"
 	web.BConfig.WebConfig.AutoRender = false
 	web.BConfig.CopyRequestBody = true
